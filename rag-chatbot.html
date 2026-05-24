@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Agentic RAG Chatbot - Lab 06</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; background: #f0f2f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .container { width: 820px; background: white; border-radius: 12px; box-shadow: 0 2px 16px rgba(0,0,0,0.1); overflow: hidden; }
+    .header { background: #0078d4; color: white; padding: 18px 24px; }
+    .header h2 { font-size: 18px; font-weight: 600; }
+    .header p { font-size: 12px; opacity: 0.8; margin-top: 4px; }
+    .action-strip { display: flex; gap: 8px; padding: 14px 20px; background: #f8f9fa; border-bottom: 1px solid #e0e0e0; }
+    .action-strip button { background: white; border: 1px solid #ccc; border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer; transition: background 0.15s; }
+    .action-strip button:hover { background: #e8f0fe; border-color: #0078d4; color: #0078d4; }
+    #status-bar { font-size: 12px; padding: 6px 20px; border-bottom: 1px solid #ffc107; display: none; }
+    #chat-box { height: 430px; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+    .msg { display: flex; flex-direction: column; max-width: 85%; }
+    .msg.user { align-self: flex-end; align-items: flex-end; }
+    .msg.bot { align-self: flex-start; align-items: flex-start; }
+    .bubble { padding: 10px 14px; border-radius: 10px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+    .msg.user .bubble { background: #0078d4; color: white; border-bottom-right-radius: 3px; }
+    .msg.bot .bubble { background: #f0f2f5; color: #222; border-bottom-left-radius: 3px; }
+    .msg.bot .bubble.error { background: #fdecea; color: #c0392b; }
+    .msg.bot .bubble.thinking { background: #fff8e1; color: #b07d00; font-style: italic; }
+    .tools-tag { font-size: 11px; color: #666; margin-top: 4px; padding: 2px 8px; background: #eef; border-radius: 4px; display: inline-block; }
+    .trace-toggle { font-size: 11px; color: #0078d4; cursor: pointer; margin-top: 4px; text-decoration: underline; }
+    .trace-panel { display: none; background: #fffbea; border: 1px solid #f0c040; border-radius: 6px; padding: 10px; font-size: 11px; margin-top: 4px; max-width: 560px; }
+    .trace-panel.open { display: block; }
+    .trace-step { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #f0c040; }
+    .trace-step:last-child { border-bottom: none; margin-bottom: 0; }
+    .input-row { display: flex; gap: 10px; padding: 16px 20px; border-top: 1px solid #e0e0e0; background: #fafafa; }
+    #question { flex: 1; padding: 10px 14px; border: 1px solid #ccc; border-radius: 8px; font-size: 14px; outline: none; }
+    #question:focus { border-color: #0078d4; }
+    #send-btn { background: #0078d4; color: white; border: none; border-radius: 8px; padding: 10px 20px; font-size: 14px; cursor: pointer; }
+    #send-btn:hover { background: #005fa3; }
+    #send-btn:disabled { background: #90bce8; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h2>Agentic RAG Chatbot</h2>
+    <p>Lab 06 — 4 tools: Knowledge Base | Web Search | Calculator | Wikipedia</p>
+  </div>
+  <div class="action-strip">
+    <button onclick="checkHealth()">Health Check</button>
+    <button onclick="ingestPDF()">Ingest PDF</button>
+    <button onclick="listTools()">List Tools</button>
+    <button onclick="clearChat()" style="margin-left:auto;">Clear Chat</button>
+  </div>
+  <div id="status-bar"></div>
+  <div id="chat-box"></div>
+  <div class="input-row">
+    <input id="question" type="text" placeholder="Ask something... (press Enter to send)" onkeydown="if(event.key==='Enter') sendQuestion()" />
+    <button id="send-btn" onclick="sendQuestion()">Send</button>
+  </div>
+</div>
+
+<script>
+  const API = "http://127.0.0.1:8001";
+  const box = document.getElementById("chat-box");
+  const statusBar = document.getElementById("status-bar");
+
+  function showStatus(msg, type) {
+    statusBar.textContent = msg;
+    statusBar.style.display = "block";
+    statusBar.style.background = type === "error" ? "#fdecea" : "#e8f5e9";
+    statusBar.style.color = type === "error" ? "#c0392b" : "#2e7d32";
+  }
+  function hideStatus() { statusBar.style.display = "none"; }
+
+  function esc(str) {
+    return String(str ?? "")
+      .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+
+  function addBubble(cls, bubbleCls, html, extras) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + cls;
+    wrap.innerHTML = `<div class="bubble ${bubbleCls}">${html}</div>${extras || ""}`;
+    box.appendChild(wrap);
+    box.scrollTop = box.scrollHeight;
+    return wrap;
+  }
+
+  function clearChat() {
+    box.innerHTML = "";
+    addBubble("bot", "", "Chat cleared!", "");
+  }
+
+  async function checkHealth() {
+    hideStatus();
+    try {
+      const r = await fetch(`${API}/health`);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const d = await r.json();
+      showStatus("Server is running on port 8001!", "ok");
+      addBubble("bot", "", `Status: ${esc(d.status)} | Vectors: ${esc(String(d.pinecone_vectors))} | Web Search: ${esc(String(d.web_search_enabled))} | LLM: ${esc(d.llm_model)}`, "");
+    } catch(e) {
+      showStatus("Cannot reach server. Run: uvicorn main:app --port 8001", "error");
+      addBubble("bot", "error", "Health check failed. Make sure uvicorn is running:\nuvicorn main:app --port 8001", "");
+    }
+  }
+
+  async function ingestPDF() {
+    hideStatus();
+    const thinking = addBubble("bot", "thinking", "Ingesting PDF... this may take 30-90 seconds.", "");
+    try {
+      const r = await fetch(`${API}/ingest`, { method: "POST" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const d = await r.json();
+      thinking.remove();
+      if (d.status === "success") {
+        addBubble("bot", "", `PDF ingested successfully!\nChunks: ${esc(String(d.chunks_ingested))}\nFile: ${esc(d.pdf_used)}`, "");
+      } else {
+        addBubble("bot", "error", esc(d.message || "Ingestion failed"), "");
+      }
+    } catch(e) {
+      thinking.remove();
+      addBubble("bot", "error", "Ingest failed: " + esc(e.message), "");
+    }
+  }
+
+  async function listTools() {
+    hideStatus();
+    try {
+      const r = await fetch(`${API}/tools`);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const d = await r.json();
+      const list = d.tools.map(t => `• ${esc(t.name)}: ${esc(t.description)}`).join("\n");
+      addBubble("bot", "", "Available tools:\n\n" + list, "");
+    } catch(e) {
+      addBubble("bot", "error", "Failed to list tools: " + esc(e.message), "");
+    }
+  }
+
+  async function sendQuestion() {
+    const input = document.getElementById("question");
+    const btn = document.getElementById("send-btn");
+    const q = input.value.trim();
+    if (!q) return;
+    input.value = "";
+    btn.disabled = true;
+    hideStatus();
+
+    addBubble("user", "", esc(q), "");
+    const thinking = addBubble("bot", "thinking", "Agent is thinking and selecting the best tool...", "");
+
+    try {
+      const r = await fetch(`${API}/query`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question: q })
+      });
+      if (!r.ok) throw new Error(`Server error ${r.status}: ${await r.text()}`);
+      const d = await r.json();
+      thinking.remove();
+
+      const answer = d.answer || d.response || d.result || JSON.stringify(d);
+      const toolsUsed = Array.isArray(d.tools_used) ? d.tools_used : [];
+      const toolTrace = Array.isArray(d.tool_trace) ? d.tool_trace : [];
+
+      const toolTag = toolsUsed.length
+        ? `<div class="tools-tag">Tools used: ${toolsUsed.map(esc).join(", ")}</div>`
+        : `<div class="tools-tag">Answered directly (no tool needed)</div>`;
+
+      let traceHTML = "";
+      if (toolTrace.length > 0) {
+        const steps = toolTrace.map(t => `
+          <div class="trace-step">
+            <strong>${esc(t.tool)}</strong><br>
+            Input: ${esc(JSON.stringify(t.input))}<br>
+            Output: ${esc(t.output_preview)}
+          </div>`).join("");
+        traceHTML = `
+          <span class="trace-toggle" onclick="this.nextElementSibling.classList.toggle('open')">Show agent trace</span>
+          <div class="trace-panel">${steps}</div>`;
+      }
+
+      const wrap = document.createElement("div");
+      wrap.className = "msg bot";
+      wrap.innerHTML = `<div class="bubble">${esc(answer)}</div>${toolTag}${traceHTML}`;
+      box.appendChild(wrap);
+      box.scrollTop = box.scrollHeight;
+
+    } catch(e) {
+      thinking.remove();
+      if (e.message.includes("fetch") || e.message.includes("Failed")) {
+        showStatus("Cannot reach server. Run: uvicorn main:app --port 8001", "error");
+      }
+      addBubble("bot", "error", "Error: " + esc(e.message), "");
+    } finally {
+      btn.disabled = false;
+      input.focus();
+    }
+  }
+
+  window.onload = () => {
+    addBubble("bot", "", "Welcome! Checking server connection...", "");
+    checkHealth();
+  };
+</script>
+</body>
+</html>
